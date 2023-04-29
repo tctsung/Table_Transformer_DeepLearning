@@ -42,19 +42,18 @@ class MyDataset(Dataset):    # inherit from torch.utils.data.DatasetDataset
     def __len__(self):
         return self.n_samples  # num of row
 def load_data(cv_set, batch_size, abs_path):
-    train = pd.read_pickle(f'{abs_path}/data/v{cv_set}_train.pkl').iloc[1:20,]
-    validate = pd.read_pickle(f'{abs_path}/data/v{cv_set}_validate.pkl').iloc[1:10,]
+    train = pd.read_pickle(f'{abs_path}/data/v{cv_set}_train.pkl')
+    validate = pd.read_pickle(f'{abs_path}/data/v{cv_set}_validate.pkl')
     train_loader = DataLoader(dataset=MyDataset(train), batch_size=batch_size, shuffle=True)
     validate_loader = DataLoader(dataset=MyDataset(validate), batch_size=batch_size, shuffle=True)
     return train_loader, validate_loader
 
-def FTTransformer_train(search_space, cv_set, num_epochs, abs_path):
+def train_forRaytune(search_space, cv_set, num_epochs, abs_path):
     """
     cv_set = 1, 2, 3; specify the set to use in 3-fold CV
     """
     # setup:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Current device: {device}")
     model = FTTransformer.make_default(
         n_num_features=328,
         cat_cardinalities=[21, 2, 15],
@@ -63,7 +62,7 @@ def FTTransformer_train(search_space, cv_set, num_epochs, abs_path):
         ).to(device)
     loss_fn = F.cross_entropy
     # setup from hyperparams:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=search_space["lr"])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=search_space["lr"], weight_decay=search_space["wd"])
     train_loader, validate_loader = load_data(cv_set, search_space["batch_size"], abs_path) # load data
     best_acc, best_bac, best_loss = 0.0, 0.0, float('inf')   # starting buffer to find optimal bac/acc
     for epoch in range(num_epochs):
@@ -90,7 +89,7 @@ def FTTransformer_train(search_space, cv_set, num_epochs, abs_path):
         y_true = y_true.detach().cpu().numpy()
         train_acc = np.mean(y_pred==y_true)
         train_bac = balanced_accuracy_score(y_true, y_pred)
-        print(f"train ACC: {train_acc:.4f}, BAC:{train_bac:.4f}")
+        # print(f"train ACC: {train_acc:.4f}, BAC:{train_bac:.4f}")
         # Evaluation:
         model.eval()               
         with torch.no_grad():      # disable backpropagation in validation set
@@ -112,7 +111,7 @@ def FTTransformer_train(search_space, cv_set, num_epochs, abs_path):
             y_true = y_true.detach().cpu().numpy()
             val_acc = np.mean(y_pred==y_true)
             val_bac = balanced_accuracy_score(y_true, y_pred)
-            print(f"validate ACC: {val_acc:.4f}, BAC:{val_bac:.4f}")
+            # print(f"validate ACC: {val_acc:.4f}, BAC:{val_bac:.4f}")
         # metrics to report:
         tune.report(train_loss=train_loss, train_acc=train_acc, train_bac=train_bac, 
                     val_loss=val_loss, val_acc=val_acc, val_bac=val_bac
@@ -129,13 +128,15 @@ def FTTransformer_train(search_space, cv_set, num_epochs, abs_path):
 
 
 def main():
+    print(f"Device: {torch.device('cuda' if torch.cuda.is_available() else 'cpu')}")
     abs_path = os.path.abspath("")  # get the absolute path because ray tune couldn't use relative path
-    num_epochs = 2  # 100
+    num_epochs = 5  # 100
     num_trials = 5
     cv_set = sys.argv[1]
     search_space = {
-        "lr": tune.loguniform(1e-4, 1e-1),
-        "batch_size": tune.choice([2, 4])
+        "lr": tune.loguniform(1e-4, 1e-1),   # learning rate
+        "wd": tune.loguniform(1e-4, 1e-1),   # wegith decay
+        "batch_size": tune.choice([16, 32, 64, 128])
     }
     scheduler = ASHAScheduler(
         metric="val_loss",            # metric for evaluation
@@ -146,20 +147,17 @@ def main():
     reporter = CLIReporter(metric_columns=["training_iteration", "train_loss","train_acc", 
                                            "train_bac","val_loss", "val_acc","val_bac"])
     result = tune.run(
-        partial(FTTransformer_train, cv_set=cv_set, num_epochs=num_epochs, abs_path=abs_path),
-        resources_per_trial={"cpu": 4},
-        # resources_per_trial={"cpu": 8, "gpu": 0.5},
+        partial(train_forRaytune, cv_set=cv_set, num_epochs=num_epochs, abs_path=abs_path),
+        resources_per_trial={"cpu": 8, "gpu": 0.5},
         config=search_space,
         num_samples=num_trials,       # num of total random trials to run
         scheduler=scheduler,
         progress_reporter=reporter  
         )  # checkpoint_at_end=True
     print(result.results_df)
-    # result = FTTransformer_train(search_space, cv_set, num_epochs)
-    # print("finish!!!")
+    torch.save(result.results_df, f"cv_{cv_set}_RayTune_df.pt")
+    torch.save(result, f"cv_{cv_set}_RayTune.pt")
+    best_trial = result.get_best_trial("val_loss", "min", "last")
+    print(f"Best trial config: {best_trial.config}' best result: {best_trial.last_result}")
 if __name__ == "__main__":
     main()
-
-
-
-
