@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import roc_auc_score
 # FTT model:
 import rtdl
 import zero
@@ -72,20 +73,36 @@ def model_evaluation(model, normalize=False, set="test"):
     test_loader = DataLoader(dataset=MyDataset(test, normalize=normalize), batch_size=32, shuffle=False)
     y_pred = torch.tensor([])
     y_true = torch.tensor([])
+    y_prob = torch.tensor([])
     for i, (x_num, x_cat, y) in enumerate(test_loader):
         y_true = torch.cat([y_true, y], dim=0)
         outputs = model(x_num, x_cat) 
+        y_prob = torch.cat([y_prob, outputs], dim=0)
         _, preds = torch.max(outputs, 1) 
         y_pred = torch.cat([y_pred, preds], dim=0)
         preds = preds.detach().numpy() 
         trues = y.detach().numpy()
+    y_prob = torch.softmax(y_prob, dim=1).detach().numpy()
     y_pred = y_pred.detach().numpy().astype('i')
     y_true = y_true.detach().numpy().astype('i')
     acc = np.mean(y_true==y_pred)
     bac = balanced_accuracy_score(y_true, y_pred)
     cm = confusion_matrix(y_true, y_pred)
+    auc = roc_auc_score(y_true, y_prob, average="weighted", multi_class="ovo") # 1 vs. rest auc
+    print(f"One vs. one weighted AUC: {auc}")
+    auc = roc_auc_score(y_true, y_prob, average="macro", multi_class="ovo")
+    print(f"One vs. one macro AUC: {auc}")
+    auc = roc_auc_score(y_true, y_prob, average="weighted", multi_class="ovr")
+    print(f"One vs. all weighted AUC: {auc}")
+    auc = roc_auc_score(y_true, y_prob, average="macro", multi_class="ovr")
+    print(f"One vs. all macro AUC: {auc}")
+    class_acc = list(cm[i,i]/np.sum(cm[i,]) for i in range(cm.shape[0]))
     macro_F1 = f1_score(y_true, y_pred, average="macro")
-    return {"ACC":round(acc,4), "BAC":round(bac,4), "macroF1":round(macro_F1,4), "CM":cm}
+    print(f"Acc in each class: {class_acc}")
+    print(cm)
+    print({"ACC":round(acc,4), "BAC":round(bac,4), "macroF1":round(macro_F1,4), 
+            "One vs. one macroAUC":round(auc,4)
+        })
 
 
 def load_data(cv_set, batch_size, abs_path):
